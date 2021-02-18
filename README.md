@@ -1,6 +1,6 @@
 # Agora Network Sniffer
 
-This is a rudimentary Python3 Network Sniffer (Ethernet II, IPv4, TCP, UDP).
+This is a rudimentary Python3 Network Sniffer (Ethernet II, ARP, IPv4, TCP, UDP).
 
 ![](./docs/sniffer_a4.png)
 
