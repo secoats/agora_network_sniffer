@@ -3,7 +3,6 @@
 import struct
 from network_constants import ETHER_TYPE_DICT, IP_PROTO_DICT
 
-
 def mac_to_str(data):
     octets = []
     for b in data:
