@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # U+0A75
 import struct
-from network_constants import ETHER_TYPE_DICT, IP_PROTO_DICT
+from network_constants import ETHER_TYPE_DICT, IP_PROTO_DICT, IPV6_EXTENSION_DICT
 
 def mac_to_str(data):
     octets = []
@@ -14,6 +14,13 @@ def ipv4_to_str(data):
     for b in data:
         octets.append(format(b, 'd'))
     return ".".join(octets)
+
+def ipv6_to_str(data):
+    parts = []
+    quartet = struct.unpack("! H H H H H H H H", data)
+    for q in quartet:
+        parts.append(format(q, 'X'))
+    return ":".join(parts)
 
 """
             - Ethernet L2 Frame -
@@ -211,6 +218,9 @@ class IPV4:
         if self.IHL > 5:
             options_len = (self.IHL - 5) * 4
 
+        if len(leftover) < options_len:
+            raise Exception("IPV4 Options extension asks for more bytes than are available")
+
         self.OPTIONS = leftover[:options_len]
         self.PAYLOAD = leftover[options_len:]
 
@@ -236,6 +246,182 @@ class IPV4:
 
     def __str__(self):
         return repr(self)
+
+
+"""
+                                  IPv6 
+------ --------------- ------------ --------------- --------------- 
+Byte  |       0       |      1     |       2       |       3       | 
+Value |         Version  &  Traffic Class  &  Flow Label           | I
+------ --------------- ------------ --------------- --------------- 
+Byte  |       4       |      5     |       6       |       7       |
+Value |         Payload Length     |  Next Header  |   Hop Limit   | H B B
+------ --------------- ------------ --------------- --------------- 
+                        16 bytes Source Address                    | 16s
+------ --------------- ------------ --------------- --------------- 
+                      16 bytes Destinaton Address                  | 16s
+------ --------------- ------------ --------------- --------------- 
+                            Extension Headers
+             There can be more extension headers following 
+           the main header. These headers are chained together
+                using the "Next Header" Field in each.
+------ --------------- ------------ --------------- --------------- 
+
+Bytes 0 - 3:
+-----------------------
+Version:        4 bits
+Traffic Class:  8 bits
+Flow Lable:     20 bits
+                -------
+                32 bits
+
+The "Next Header" field serves to both indicate that an extension
+header follows or as a protocol identifier for the payload (upper layer).
+
+Like the main header, each extension header has a "Next Header" field.
+
+You have to follow the "Next Header" chain in each (extension) header 
+until you finally reach a non-NH value like 0x08 (TCP) or 0x11 (UDP).
+
+Ipv6 Next Header values:
+------  -----------------------------------------------
+0       Hop-by-Hop Options 
+43      Routing
+44      Fragment
+50      Encapsulating Security Payload (ESP) 
+51      Authentication Header (AH)
+60      Destination Options (before upper-layer header)
+135     Mobility (currently without upper-layer header)
+139     Host Identity Protocol
+140     Shim6 Protocol
+253     Reserved
+254     Reserved
+------  -----------------------------------------------
+59      No Next header (ignore leftover payload too)
+------  -----------------------------------------------
+
+Any other value should indicate an upper layer header follows next.
+
+Curious is that "59 No Next Header" value (source en.wiki):
+
+"Value 59 (No Next Header) in the Next Header field indicates that there is no next header whatsoever following this one, 
+not even a header of an upper-layer protocol. It means that, from the header's point of view, the IPv6 packet ends right after it: 
+the payload should be empty. There could, however, still be data in the payload if the payload length in the first header of 
+the packet is greater than the length of all extension headers in the packet. This data should be ignored by hosts, but passed unaltered by routers."
+
+Might be useful for data smuggling.
+"""
+class IPV6:
+    ID = 0x86DD # EtherType
+
+    def __init__(self, data):
+        ver_traffic_flow, pay_len, next_header, hop_limit, source, \
+            destination, leftover = self.unpack_ipv6(data)
+        
+        # Bytes 0 - 3
+        # 4 bits | 8 bits | 20 bits
+        self.VERSION = ver_traffic_flow >> 28                   # 4 bits
+        self.TRAFFIC_CLASS = (ver_traffic_flow >> 20) & 0xFF    # 8 bits
+        self.FLOW_LABEL = ver_traffic_flow & 0xFFFFF            # 20 bits
+
+        # Bytes 4 and 5
+        self.PAYLOAD_LENGTH = pay_len
+
+        self.NEXT_HEADER = next_header
+
+        # Byte 7
+        self.HOP_LIMIT = hop_limit
+        
+        # Bytes 8 - 23
+        self.SOURCE = source
+
+        # Bytes 24 - 39
+        self.DESTINATION = destination
+
+        self.PAYLOAD = leftover
+
+    def unpack_ipv6(self, data):
+        VER_TRAFFIC_FLOW, PAY_LEN, NEXT, HOP_LIM, \
+            SOURCE, DEST = struct.unpack("! I H B B 16s 16s", data[:40])
+
+        return VER_TRAFFIC_FLOW, PAY_LEN, NEXT, HOP_LIM, \
+            SOURCE, DEST, data[40:]
+
+    def __repr__(self):
+        source_ip = ipv6_to_str(self.SOURCE)
+        dest_ip = ipv6_to_str(self.DESTINATION)
+
+        next_h = hex(self.NEXT_HEADER)
+        if self.NEXT_HEADER in IP_PROTO_DICT:
+            next_h = IP_PROTO_DICT[self.NEXT_HEADER]
+
+        res = "[ IPV6 - "
+        res += f"Source: {source_ip}; "
+        res += f"Dest: {dest_ip}; "
+        res += f"Next: {next_h}; "
+        res += f"HL: {self.HOP_LIMIT}; "
+        res += f"TC: {self.TRAFFIC_CLASS}; "
+        res += f"FL: {self.FLOW_LABEL}; "
+        res += "]"
+        return res
+
+    def __str__(self):
+        return repr(self)
+
+"""
+                        IPV6 Extension Headers 
+------ --------------- ------------ --------------- --------------- 
+Byte  |       0       |      1     |       2       |       3       | 
+Value |  Next Header  |     HEL    |      ???      |      ???      | B B
+------ --------------- ------------ --------------- --------------- 
+Byte  |       4       |      5     |       6       |       7       |
+Value |      ???      |     ???    |      ???      |      ???      | 6s
+------ --------------- ------------ --------------- --------------- 
+                   HEL * 8 more bytes are used     
+------ --------------- ------------ --------------- --------------- 
+
+Generic Extension headers are at least 8 bytes long.
+
+Byte 0 indicates the next ipv6 header or the upper layer payload.
+
+Byte 1 HEL is "Header Extension Length". It indicates how many more bytes are used beyond the minimum 8 bytes.
+Just multiply the value in this Byte with 8 to get how many bytes more are used.
+"""
+class IPV6_GENERIC_EXTENSION:
+
+    ID_DICT = IPV6_EXTENSION_DICT
+
+    def __init__(self, data):
+        next_header, header_ext_length, default_body, leftover = self.unpack_ipv6_extension(data)
+
+        self.NEXT_HEADER = next_header
+        self.HEADER_EXT_LENGTH = header_ext_length
+
+        body_ext_len = self.HEADER_EXT_LENGTH * 8
+
+        if len(leftover) < body_ext_len:
+            raise Exception("IPV6 Extension Header asks for more bytes than are available")
+
+        self.OPTIONS_BODY = default_body + leftover[:body_ext_len]
+        self.PAYLOAD = leftover[body_ext_len:]
+
+    def unpack_ipv6_extension(self, data):
+        NEXT_HEADER, HEADER_EXT_LENGTH, DEFAULT_BODY = struct.unpack("! B B 6s", data[:8])
+        return NEXT_HEADER, HEADER_EXT_LENGTH, DEFAULT_BODY, data[8:]
+
+    def __repr__(self):
+        
+        next_h = hex(self.NEXT_HEADER)
+        if self.NEXT_HEADER in IP_PROTO_DICT:
+            next_h = IP_PROTO_DICT[self.NEXT_HEADER]
+
+        res = f"[ IPv6 Extension - Next: {next_h}"
+
+        return res
+
+    def __str__(self):
+        return repr(self)
+
 
 """
                                   UDP 
@@ -391,7 +577,10 @@ Example Output:
 58 07 01 00 00 01 00 00 00 00 00 00 06 67 6F 6F   X............goo
 67 6C 65 03 63 6F 6D 00 00 01 00 01               gle.com.....
 """
-def hexdump(bytes_input, left_padding=0, byte_width=16):
+def hexdump(bytes_input, left_padding=0, byte_width=16, hex_mode=True, char_mode=True):
+    if not hex_mode and not char_mode:
+        return ""
+    
     current = 0
     end = len(bytes_input)
     result = ""
@@ -403,20 +592,23 @@ def hexdump(bytes_input, left_padding=0, byte_width=16):
         result += " " * left_padding
 
         # hex section
-        for b in byte_slice:
-            result += format(b, '02X') + " "
+        if hex_mode:
+            for b in byte_slice:
+                result += format(b, '02X') + " "
 
         # filler
-        for _ in range(byte_width - len(byte_slice)):
-            result += " " * 3
-        result += "  "
+        if hex_mode and char_mode:
+            for _ in range(byte_width - len(byte_slice)):
+                result += " " * 3
+            result += "  "
 
         # printable character section
-        for b in byte_slice:
-            if (b >= 32) and (b < 127):
-                result += chr(b)
-            else:
-                result += "."
+        if char_mode:
+            for b in byte_slice:
+                if (b >= 32) and (b < 127):
+                    result += chr(b)
+                else:
+                    result += "."
 
         result += "\n"
         current += byte_width
